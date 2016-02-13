@@ -1,0 +1,10 @@
+{
+    "name": "whackashoe/karclient",
+    "description": "kar: the kahuna ambiguity resolver",
+    "keywords": ["kar", "client", "search", "kahuna", "ambiguity", "resolver"],
+    "license": "MIT",
+    "type": "project",
+    "require": {
+        "nategood/httpful": "0.2.*"
+    }
+}
