@@ -19,11 +19,11 @@ RM=rm -f
 all: server
 
 server: $(SRC_DIR)/server.o
-	$(CXX) $(CPPFLAGS) $(SRC_DIR)/server.o -o $(DIST_DIR)/server $(LDFLAGS)
-	@echo "\nserver built\n"
+	$(CXX) $(CPPFLAGS) $(SRC_DIR)/kar.o -o $(DIST_DIR)/kar $(LDFLAGS)
+	@echo "\nserver built"
 
-$(SRC_DIR)/server.o: $(SRC_DIR)/server.cpp $(SRC_DIR)/*.hpp
-	$(CXX) $(CPPFLAGS) -c $(SRC_DIR)/server.cpp -o $(SRC_DIR)/server.o
+$(SRC_DIR)/server.o: $(SRC_DIR)/kar.cpp $(SRC_DIR)/*.hpp
+	$(CXX) $(CPPFLAGS) -c $(SRC_DIR)/kar.cpp -o $(SRC_DIR)/kar.o
 
 clean:
 	$(RM) $(SRC_DIR)/*.o $(DIST_DIR)/*
