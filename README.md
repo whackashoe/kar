@@ -28,17 +28,20 @@ To build just run `make` in root directory.
 
 ### Client Requirements
 
-A small example "client" is included. To use you must have php and composer. 
+A small example "client" is included. To use you must have PHP 5.3+ and [composer](https://getcomposer.org/).
 
-Run `composer install` inside client directory.
+Note: you may need to install / enable PHP's cURL extension.
+
+Change into client directory: `cd client` then run `composer install` to install client dependencies.
 
 Then `cd src` and `php example.php` - make sure the server is already running (and same port etc).
 
-
+Read through this file to understand how to write your own client.
 
 ## Configuration
 
-Modify `config.json` to your liking 
+**Set a password**
+
 
 ## License
 

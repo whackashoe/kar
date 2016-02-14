@@ -11,17 +11,20 @@
 #include <cstdlib>
 #include <sstream>
 #include <memory>
-#include <regex>
 #include <fstream>
 #include <streambuf>
-
+#include <random>
 
 #include <unistd.h>
 #include <signal.h>
 #include <stdlib.h>
 
-#include <boost/network/protocol/http/server.hpp>
-#include <boost/regex.hpp>
+#include <boost/config/warning_disable.hpp>
+#include <boost/network/include/http/server.hpp>
+#include <boost/network/utils/thread_pool.hpp>
+#include <boost/range/algorithm/find_if.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/thread.hpp>
 
 #include "json.hpp"
 #include "ordered_bounded_queue.hpp"
@@ -37,17 +40,49 @@ using namespace kar;
 
 namespace kar
 {
+// thread state
+boost::mutex mtx;
 
-trie tree;
-std::map<std::string, std::size_t> ids;
+// database container
+struct database
+{
+    trie tree;
+    std::map<std::string, std::size_t> ids;
+};
+std::map<std::string, database> databases;
+
+
+// settings
 bool verbose { false };
-std::string port         { "4334" };
-std::string host         { "0.0.0.0" };
-std::string amnt_default { "10" };
-std::string insc_default { "1" };
-std::string delc_default { "1" };
-std::string repc_default { "1" };
-std::string maxc_default { "100" };
+std::size_t port          { 4334 };
+std::string host          { "0.0.0.0" };
+std::size_t thread_amount { 8 };
+std::string password      { ([](std::size_t length) {
+    static const std::string alphanums =
+        "0123456789"
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+    static std::mt19937 rg{std::random_device{}()};
+    static std::uniform_int_distribution<> pick(0, alphanums.size() - 1);
+
+    std::string s;
+
+    s.reserve(length);
+
+    while(length--) {
+        s += alphanums[pick(rg)];
+    }
+
+    return s;
+})(32) };
+
+// defaults
+constexpr char amnt_default[] { "10" };
+constexpr char insc_default[] { "1" };
+constexpr char delc_default[] { "1" };
+constexpr char repc_default[] { "1" };
+constexpr char maxc_default[] { "100" };
 
 
 result_container render_error(const std::string & s, const std::string & piece)
@@ -58,6 +93,7 @@ result_container render_error(const std::string & s, const std::string & piece)
     const std::string rstr { ss.str() };
 
     if(verbose) {
+        boost::lock_guard<boost::mutex> lock(mtx);
         std::cerr << rstr;
     }
 
@@ -84,6 +120,7 @@ std::string trim(const std::string & s)
 }
 
 json exec_query(
+    database & db,
     const std::string & search_term,
     const std::size_t   amount,
     const unsigned      insert_cost,
@@ -91,7 +128,7 @@ json exec_query(
     const unsigned      replace_cost,
     const unsigned      max_cost
 ) {
-    const std::vector<std::pair<unsigned, std::string>> results { tree.search(
+    const std::vector<std::pair<unsigned, std::string>> results { db.tree.search(
         search_term,
         amount,
         insert_cost,
@@ -102,7 +139,7 @@ json exec_query(
 
     json jres = json::array();
     for(auto & i : results) {
-        jres.push_back(json::object({{ "id", ids[i.second] }, { "d", i.first }}));
+        jres.push_back(json::object({{ "id", db.ids[i.second] }, { "d", i.first }}));
     }
 
     return jres;
@@ -116,8 +153,6 @@ void display_usage()
         << "-h            : show this help" << std::endl
         << "-v            : show version" << std::endl
         << "-V            : set verbose" << std::endl
-        << "-H host       : set host to listen on" << std::endl
-        << "-P port       : set port to listen on" << std::endl
         << "-d            : run as daemon" << std::endl;
 }
 
@@ -128,52 +163,246 @@ void display_version()
 
 }
 
-struct handler;
-typedef boost::network::http::server<handler> http_server;
+struct async_handler;
+typedef boost::network::http::async_server<async_handler> server;
 
-struct handler {
-    std::map<std::string, std::string> parse_params(const std::string& destination) //with boost
+struct connection_handler : boost::enable_shared_from_this<connection_handler>
+{
+    server::connection_ptr conn;
+	server::request const &req;
+    std::map<std::string, std::string> qparams;
+    std::string protocol, host, path, query;
+	std::string body;
+    std::vector<server::response_header> headers;
+    bool password_authorized;
+
+	connection_handler(server::connection_ptr conn, server::request const &request)
+    : conn(conn)
+	, req(request)
+    , body("")
+    , headers({
+        server::response_header{"Connection",   "close"},
+        server::response_header{"Content-Type", "application/json"},
+        server::response_header{"X-Powered-By", "kar | kahuna ambiguity resolver"}})
+    , password_authorized(false)
     {
-        const std::string url { std::string("http://") + host + ":" + port + destination };
-        const std::regex ex("(http|https)://([^/ :]+):?([^/ ]*)(/?[^ #?]*)\\x3f?([^ #]*)#?([^ ]*)");
-        std::cmatch what;
+        parse_destination(req.destination);
 
-        std::map<std::string, std::string> query_params;
-        if(std::regex_match(url.c_str(), what, ex)) {
-            const std::string query { std::string(what[5].first, what[5].second) };
+        // check for password authorization
+        for(auto i : req.headers) {
+            if(i.name == "X-Auth-Password" && i.value == password) {
+                password_authorized = true;
+            }
+        }
+    }
 
+    void parse_destination(const std::string& destination) //with boost
+    {
+        const std::string url { std::string("http://") + host + ":" + std::to_string(port) + destination };
+
+
+        const std::string prot_end("://");
+        std::string::const_iterator prot_i = search(url.begin(), url.end(),
+                                               prot_end.begin(), prot_end.end());
+        protocol.reserve(std::distance(url.begin(), prot_i));
+        std::transform(url.begin(), prot_i,
+                  std::back_inserter(protocol),
+                  std::ptr_fun<int,int>(std::tolower)); // protocol is icase
+
+        if(prot_i == url.end()) {
+            return;
+        }
+
+        std::advance(prot_i, prot_end.length());
+        std::string::const_iterator pathi = std::find(prot_i, url.end(), '/');
+        host.reserve(std::distance(prot_i, pathi));
+        std::transform(prot_i, pathi,
+                  std::back_inserter(host),
+                  std::ptr_fun<int,int>(std::tolower)); // host is icase
+
+        std::string::const_iterator queryi = std::find(pathi, url.end(), '?');
+        path.assign(pathi, queryi);
+        if(queryi != url.end()) {
+            ++queryi;
+        }
+        query.assign(queryi, url.end());
+
+
+        {
             std::istringstream iss(query);
             for (std::string chunk; std::getline(iss, chunk, '&'); ) {
                 if(! chunk.empty()) {
                     std::istringstream iss_s(std::move(chunk));
                     std::vector<std::string> pieces;
-                    
+
                     for (std::string piece; std::getline(iss_s, piece, '='); ) {
                         pieces.push_back(std::move(piece));
                     }
 
                     if(pieces.size() == 2 && ! pieces[0].empty()) {
-                        query_params[pieces[0]] = pieces[1];
+                        qparams[pieces[0]] = pieces[1];
                     }
                 }
             }
         }
-
-        return query_params;
     }
 
-    void operator() (http_server::request const &request,
-                     http_server::response &response)
-    {
-        auto err = [](const std::string & error)
-        {
-            json jres;
-            jres["status"] = json::object();
-            jres["status"]["success"] = false;
-            jres["status"]["error"] = error;
 
-            return http_server::response::stock_reply(http_server::response::bad_request, jres.dump());
+    void err(const std::string & error)
+    {
+        json jres;
+        jres["status"] = json::object();
+        jres["status"]["success"] = false;
+        jres["status"]["error"] = error;
+
+        conn->set_status(server::connection::bad_request);
+        conn->set_headers(boost::make_iterator_range(headers.begin(), headers.end()));
+        conn->write(jres.dump());
+    };
+
+    std::string get_db_name_from_path() const
+    {
+        return path.substr(1, path.length());
+    }
+
+	void accept()
+    {
+        {
+            const std::string db_name = get_db_name_from_path();
+            if(databases.find(db_name) == databases.end()) {
+                err("database_not_found");
+                return;
+            }
+        }
+
+		int cl;
+		server::request::headers_container_type const &hs = req.headers;
+		for(server::request::headers_container_type::const_iterator it = hs.begin(); it!=hs.end(); ++it) {
+			if(boost::to_lower_copy(it->name)=="content-length") {
+				cl = boost::lexical_cast<int>(it->value);
+				break;
+			}
+		}
+
+        if(verbose) {
+            boost::lock_guard<boost::mutex> lock(mtx);
+            std::cout << req.method
+                      << " " << req.source
+                      << " " << get_db_name_from_path()
+                      << std::endl;
+        }
+
+        if(req.method == "GET") {
+            handle_get_request();
+        } else if(req.method == "POST") {
+    		read_body_chunk(cl);
+        } else if(req.method == "DELETE") {
+            handle_delete_request();
+        } else {
+            err("method_not_supported");
+        }
+	}
+
+	void read_body_chunk(std::size_t left2read)
+    {
+		conn->read(
+			boost::bind(
+				&connection_handler::handle_post_read,
+				connection_handler::shared_from_this(),
+				_1, _2, _3, left2read
+				)
+			);
+	}
+
+	void handle_post_read(
+        server::connection::input_range range,
+        boost::system::error_code error,
+        std::size_t size,
+        std::size_t left2read
+    ) {
+		if(! error) {
+			body.append(boost::begin(range), size);
+			const std::size_t left { left2read - size };
+
+			if(left > 0) {
+				read_body_chunk(left);
+			} else {
+                handle_post_request();
+			}
+		} else {
+            boost::lock_guard<boost::mutex> lock(mtx);
+    		std::cout << "error: " << error.message() << std::endl;
+        }
+	}
+
+	void handle_post_request()
+	{
+        if(! password_authorized) {
+            err("password_auth");
+            return;
+        }
+
+        json req_body;
+        try {
+            req_body = json::parse(body);
+        } catch(...) {
+            std::cout << "json parse error, recieved: " << body.size() << std::endl;
+            err("json_parse");
+            return;
+        }
+
+        database & db = databases[get_db_name_from_path()];
+
+        std::size_t amount_inserted { 0 };
+        {
+            boost::lock_guard<boost::mutex> lock(mtx);
+            if(! req_body.is_object()) {
+                err("not_json_object");
+                return;
+            }
+
+            for(auto it = req_body.begin(); it != req_body.end(); ++it) {
+                const auto k = it.key();
+                const auto v = it.value();
+
+                if(! v.is_number()) {
+                    err("id_is_not_number");
+                    return;
+                }
+
+                db.tree.insert(k);
+                db.ids[k] = v;
+                ++amount_inserted;
+            }
+        }
+
+        json jres;
+        jres["status"] = json::object();
+        jres["status"]["success"] = true;
+
+        conn->set_status(server::connection::ok);
+        conn->set_headers(boost::make_iterator_range(headers.begin(), headers.end()));
+        conn->write(jres.dump());
+    }
+
+	void handle_get_request()
+	{
+        if(qparams.find("q") == qparams.end()) {
+            err("q_not_supplied");
+            return;
+        }
+
+        const std::string search_term { qparams["q"] };
+
+        auto find_or_default = [&](const std::string & key, const std::string & default_) {
+            return qparams.find(key) == qparams.end() ? default_ : qparams[key];
         };
+
+        const std::string s_amnt { find_or_default("amnt", std::string(amnt_default)) };
+        const std::string s_insc { find_or_default("insc", std::string(insc_default)) };
+        const std::string s_delc { find_or_default("delc", std::string(delc_default)) };
+        const std::string s_repc { find_or_default("repc", std::string(repc_default)) };
+        const std::string s_maxc { find_or_default("maxc", std::string(maxc_default)) };
 
         auto num_check = [](const std::string & s)
         {
@@ -181,9 +410,9 @@ struct handler {
                 return render_error("not a number", s);
             }
 
-            unsigned n;
             try {
-                n = std::stoul(s);
+                const unsigned n = std::stoul(s); // todo: stoul is unsigned long
+                return result_container(n);
             } catch(std::out_of_range & e) {
                 return render_error("out of range => ", s);
             } catch(std::invalid_argument & e) {
@@ -191,90 +420,63 @@ struct handler {
             } catch(std::exception & e) {
                 return render_error("unknown exception encountered => ", s);
             }
-
-            return result_container(n);
         };
 
-        std::map<std::string, std::string> qparams { parse_params(request.destination) };
+        const result_container amnt { num_check(s_amnt) }; if(amnt.get_type() != result_type::UNSIGNED) { err("notnum_amnt"); return; }
+        const result_container insc { num_check(s_insc) }; if(insc.get_type() != result_type::UNSIGNED) { err("notnum_insc"); return; }
+        const result_container delc { num_check(s_delc) }; if(delc.get_type() != result_type::UNSIGNED) { err("notnum_delc"); return; }
+        const result_container repc { num_check(s_repc) }; if(repc.get_type() != result_type::UNSIGNED) { err("notnum_repc"); return; }
+        const result_container maxc { num_check(s_maxc) }; if(maxc.get_type() != result_type::UNSIGNED) { err("notnum_maxc"); return; }
 
-        if(request.method == "GET") {
-            if(qparams.find("q") == qparams.end()) {
-                response = err("q_not_supplied");
-                return;
-            }
+        database & db = databases[get_db_name_from_path()];
+        
+        json jres;
+        jres["status"] = json::object();
+        jres["status"]["success"] = true;
+        jres["data"] = exec_query(db, search_term, amnt, insc, delc, repc, maxc);
 
-            const std::string search_term    { qparams["q"] };
-            const std::string s_amnt { qparams.find("amnt") == qparams.end() ? amnt_default : qparams["amnt"] };
-            const std::string s_insc { qparams.find("insc") == qparams.end() ? insc_default : qparams["insc"] };
-            const std::string s_delc { qparams.find("delc") == qparams.end() ? delc_default : qparams["delc"] };
-            const std::string s_repc { qparams.find("repc") == qparams.end() ? repc_default : qparams["repc"] };
-            const std::string s_maxc { qparams.find("maxc") == qparams.end() ? maxc_default : qparams["maxc"] };
+        conn->set_status(server::connection::ok);
+        conn->set_headers(boost::make_iterator_range(headers.begin(), headers.end()));
+        conn->write(jres.dump());
+	}
 
-            const result_container amnt { num_check(s_amnt) }; if(amnt.get_type() != result_type::UNSIGNED) { response = err("notnum_amnt"); return; }
-            const result_container insc { num_check(s_insc) }; if(insc.get_type() != result_type::UNSIGNED) { response = err("notnum_insc"); return; }
-            const result_container delc { num_check(s_delc) }; if(delc.get_type() != result_type::UNSIGNED) { response = err("notnum_delc"); return; }
-            const result_container repc { num_check(s_repc) }; if(repc.get_type() != result_type::UNSIGNED) { response = err("notnum_repc"); return; }
-            const result_container maxc { num_check(s_maxc) }; if(maxc.get_type() != result_type::UNSIGNED) { response = err("notnum_maxc"); return; }
-
-            json jres;
-            jres["status"] = json::object();
-            jres["status"]["success"] = true;
-            jres["data"] = exec_query(search_term, amnt, insc, delc, repc, maxc);
-
-            response = http_server::response::stock_reply(http_server::response::ok, jres.dump());
-            return;
-        } else if(request.method == "POST" || request.method == "PATCH") {
-            json req_body;
-            try {
-                req_body = json::parse(request.body);
-            } catch(...) {
-                response = err("json_parse");
-                return;
-            }
-
-            if(! req_body.is_object()) {
-                response = err("not_json_object");
-                return;
-            }
-
-            if(request.method == "POST") {
-                tree.clear();
-                ids.clear();
-            }
-
-            std::size_t amount_inserted { 0 };
-            for(auto it = req_body.begin(); it != req_body.end(); ++it) {
-                const auto k = it.key();
-                const auto v = it.value();
-
-                if(! v.is_number()) {
-                    response = err("id_is_not_number");
-                    return;
-                }
-
-                tree.insert(k);
-                ids[k] = v;
-                ++amount_inserted;
-            }
-
-            json jres;
-            jres["status"] = json::object();
-            jres["status"]["success"] = true;
-
-            if(verbose) {
-                std::cout << amount_inserted << " items inserted (" << ids.size() << ")" << std::endl;
-            }
-
-            response = http_server::response::stock_reply(http_server::response::ok, jres.dump());
-            return;
-        } else {
-            response = err("method_not_supported");
+    void handle_delete_request()
+    {
+        if(! password_authorized) {
+            err("password_auth");
             return;
         }
+
+        database & db = databases[get_db_name_from_path()];
+
+        {
+            boost::lock_guard<boost::mutex> lock(mtx);
+            db.tree.clear();
+            db.ids.clear();
+        }
+
+        json jres;
+        jres["status"] = json::object();
+        jres["status"]["success"] = true;
+
+        conn->set_status(server::connection::ok);
+        conn->set_headers(boost::make_iterator_range(headers.begin(), headers.end()));
+        conn->write(jres.dump());
+    }
+};
+
+
+struct async_handler
+{
+    void operator()(server::request const &request, server::connection_ptr conn)
+    {
+        boost::shared_ptr<connection_handler> hand(new connection_handler(conn, request));
+        hand->accept();
     }
 
-    void log(http_server::string_type const &info) {
-        std::cerr << "ERROR: " << info << '\n';
+    void error(boost::system::error_code const & ec)
+    {
+        std::cout << "async error: " << ec.message() << std::endl;
     }
 };
 
@@ -289,7 +491,7 @@ void load_config(const std::string & src)
 
     std::string str;
 
-    t.seekg(0, std::ios::end);   
+    t.seekg(0, std::ios::end);
     str.reserve(t.tellg());
     t.seekg(0, std::ios::beg);
 
@@ -299,22 +501,30 @@ void load_config(const std::string & src)
     try {
         json c = json::parse(str);
 
-        auto read_from_config = [&](const std::string & key, std::string & v)
+        auto read_string_from_config = [&](const std::string & key, std::string & v)
         {
             if(c.find(key) != c.end()) {
                 v = c[key];
-                std::cout << "config: " << key << " set" << std::endl;
             }
         };
 
-        read_from_config("host", host);
-        read_from_config("port", port);
-        read_from_config("amnt", amnt_default);
-        read_from_config("insc", insc_default);
-        read_from_config("delc", delc_default);
-        read_from_config("repc", repc_default);
-        read_from_config("maxc", maxc_default);
+        auto read_sizet_from_config = [&](const std::string & key, std::size_t & v)
+        {
+            if(c.find(key) != c.end()) {
+                v = c[key];
+            }
+        };
 
+        read_string_from_config("host", host);
+        read_sizet_from_config("port", port);
+        read_sizet_from_config("threads", thread_amount);
+        read_string_from_config("password", password);
+
+        json db_names = c["databases"];
+        for(std::string name : db_names) {
+            databases[name] = database();
+            std::cout << "database \"" << name << "\" created" << std::endl;
+        }
     } catch(...) {
         std::cerr << "error reading from config" << std::endl;
     }
@@ -342,7 +552,7 @@ int main(int argc, char ** argv)
     {
         int c;
 
-        while ((c = getopt (argc, argv, "vVhH:P:dc:")) != -1) {
+        while ((c = getopt (argc, argv, "vVhdc:")) != -1) {
             switch (c) {
             case 'v':
                 display_version();
@@ -354,12 +564,6 @@ int main(int argc, char ** argv)
             case 'h':
                 display_usage();
                 return EXIT_SUCCESS;
-                break;
-            case 'H':
-                host = optarg;
-                break;
-            case 'P':
-                port = optarg;
                 break;
             case 'd':
                 daemonize = true;
@@ -377,10 +581,11 @@ int main(int argc, char ** argv)
         }
     }
 
-    std::cout << "kar started" << std::endl;
-
     if(! config_src.empty()) {
         load_config(config_src);
+    } else {
+        std::cerr << "no config file given" << std::endl;
+        return EXIT_FAILURE;
     }
 
     if(daemonize) {
@@ -390,18 +595,27 @@ int main(int argc, char ** argv)
         }
     }
 
+    std::cout << "kar started" << std::endl;
+    std::cout << thread_amount << " threads listening on " << host << ":" << port << std::endl;
 
-    try {
-        std::cout << "listening on " << host << ":" << port << std::endl;
-        handler handler_;
-        http_server::options options(handler_);
-        http_server server_(options.address(host).port(port));
-        server_.run();
-    } catch (std::exception &e) {
-        std::cerr << e.what() << std::endl;
-        return EXIT_FAILURE;
+    async_handler handler;
+    server::options options(handler);
+
+    options.address(host).port(std::to_string(port))
+        .thread_pool(boost::make_shared<boost::network::utils::thread_pool>(thread_amount));
+
+    server instance(options);
+    std::vector<boost::thread> threads;
+    for(std::size_t i=0; i<thread_amount; ++i) {
+        threads.push_back(boost::thread(boost::bind(&server::run, &instance)));
     }
 
+    instance.run();
+
+    for(auto & i : threads) {
+        i.join();
+    }
+    
     return EXIT_SUCCESS;
 }
 

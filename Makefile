@@ -1,6 +1,6 @@
-CXX=g++
+CXX=clang++
 CC=gcc
-CPPFLAGS=-std=c++11 -Wall -Wextra -pedantic -O3
+CPPFLAGS=-std=c++11 -Wall -Wextra -pedantic -O0
 CFLAGS=
 LDFLAGS=-pthread \
 	-lcppnetlib-uri \
@@ -18,13 +18,13 @@ RM=rm -f
 
 all: server
 
-server: $(SRC_DIR)/server.o
+server: $(SRC_DIR)/kar.o
 	$(CXX) $(CPPFLAGS) $(SRC_DIR)/kar.o -o $(DIST_DIR)/kar $(LDFLAGS)
 	@echo "\nserver built"
 
-$(SRC_DIR)/server.o: $(SRC_DIR)/kar.cpp $(SRC_DIR)/*.hpp
+$(SRC_DIR)/kar.o: $(SRC_DIR)/kar.cpp $(SRC_DIR)/*.hpp
 	$(CXX) $(CPPFLAGS) -c $(SRC_DIR)/kar.cpp -o $(SRC_DIR)/kar.o
 
 clean:
-	$(RM) $(SRC_DIR)/*.o $(DIST_DIR)/*
+	$(RM) $(SRC_DIR)/*.o
 	@echo "\ncleaned"
