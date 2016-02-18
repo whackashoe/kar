@@ -34,6 +34,14 @@ function simplify($word)
 
     $dictionary_path = '/usr/share/dict/words';
     $words = file($dictionary_path);
+
+    // there can never be a 0 for id since it is used internally to work around
+    // so we index starting at 1 
+    // we can just move the word at pos 0 to end
+    $words[count($words)] = $words[0];
+    unset($words[0]);
+
+
     foreach($words as $k => $v) {
         $words[$k] = simplify($v);
     }
@@ -53,6 +61,9 @@ function simplify($word)
 /*
  * GET performs a search query
  *
+ * use the following query parameters in your application
+ * only q is required, the rest have default values
+ *
  * @param q    search query
  * @param insc insert cost
  * @param delc delete cost
@@ -70,6 +81,7 @@ function simplify($word)
         ->send();
 
     foreach($response->body->data as $i) {
+        // we get id back so we print the word it corresponds to
         echo $words[$i->id] . "\t=>\t" . $i->d . "\n";
     }
 }
