@@ -1,7 +1,6 @@
 #ifndef KAR_TRIE_HPP
 #define KAR_TRIE_HPP
 
-#include <deque>
 #include <map>
 #include <utility>
 #include <string>
@@ -20,6 +19,7 @@ struct trie
 
     // equal to "" unless word completed here
     std::string word;
+    bool completed { false };
 
     trie()
     : children(std::map<char, std::unique_ptr<trie>>())
@@ -45,6 +45,7 @@ struct trie
         }
 
         n->word = word;
+        n->completed = true;
     }
 
     void search_impl(
@@ -76,7 +77,7 @@ struct trie
         }
 
         // there is a word here
-        if(tree->word != "") {
+        if(tree->completed) {
             if(current_row[last_row.size() - 1] < max_cost) {
                 obqueue.push(current_row[last_row.size() - 1], tree->word);
             }
