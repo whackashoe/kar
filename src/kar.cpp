@@ -14,6 +14,7 @@
 #include <fstream>
 #include <streambuf>
 #include <random>
+#include <unordered_map>
 
 #include <unistd.h>
 #include <signal.h>
@@ -40,6 +41,14 @@ using namespace kar;
 
 namespace kar
 {
+// constants
+constexpr char amnt_default[] { "10" };
+constexpr char insc_default[] { "1" };
+constexpr char delc_default[] { "1" };
+constexpr char repc_default[] { "1" };
+constexpr char maxc_default[] { "100" };
+constexpr char special_default_word[] { "ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ" };
+
 // thread state
 boost::mutex mtx;
 
@@ -47,9 +56,16 @@ boost::mutex mtx;
 struct database
 {
     trie tree;
-    std::map<std::string, std::size_t> ids;
+    std::unordered_map<std::string, std::size_t> ids;
+
+
+    database()
+    {
+        tree.insert(special_default_word);
+        ids[special_default_word] = 0;
+    }
 };
-std::map<std::string, database> databases;
+std::unordered_map<std::string, database> databases;
 
 
 // settings
@@ -77,12 +93,6 @@ std::string password      { ([](std::size_t length) {
     return s;
 })(32) };
 
-// defaults
-constexpr char amnt_default[] { "10" };
-constexpr char insc_default[] { "1" };
-constexpr char delc_default[] { "1" };
-constexpr char repc_default[] { "1" };
-constexpr char maxc_default[] { "100" };
 
 
 result_container render_error(const std::string & s, const std::string & piece)
@@ -138,8 +148,15 @@ json exec_query(
     ) };
 
     json jres = json::array();
-    for(auto & i : results) {
-        jres.push_back(json::object({{ "id", db.ids[i.second] }, { "d", i.first }}));
+    for(const std::pair<std::size_t, std::string> & i : results) {
+        const std::size_t id       { db.ids[i.second] };
+        const std::size_t distance { i.first };
+
+        // we skip the default id (special word)
+        if(id == 0) {
+            continue;
+        }
+        jres.push_back(json::object({{ "id", id }, { "d", distance }}));
     }
 
     return jres;
@@ -451,8 +468,7 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
 
         {
             boost::lock_guard<boost::mutex> lock(mtx);
-            db.tree.clear();
-            db.ids.clear();
+            db = database();
         }
 
         json jres;
