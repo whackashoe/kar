@@ -1,6 +1,6 @@
-CXX=clang++
+CXX=g++
 CC=gcc
-CPPFLAGS=-std=c++11 -Wall -Wextra -pedantic -O0
+CPPFLAGS=-std=c++11 -Wall -Wextra -pedantic -O2
 CFLAGS=
 LDFLAGS=-pthread \
 	-lcppnetlib-uri \

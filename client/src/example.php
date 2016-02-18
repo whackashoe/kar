@@ -79,7 +79,7 @@ function simplify($word)
  *
  * note: you must attach X-Auth-Password header
  *
- * @return json array of object conaining id and distance from search query
+ * @return json object containing status of success
  */
 {
     echo "deleting...";
