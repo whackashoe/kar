@@ -84,7 +84,7 @@ struct trie
         }
 
 
-        // if any entries in the row are less than the maximum cost, then 
+        // if any entries in the row are less than the maximum cost, then
         // recursively search each branch of the trie
         if(*min_element(current_row.begin(), current_row.end()) < max_cost) {
             for(auto & it : tree->children) {

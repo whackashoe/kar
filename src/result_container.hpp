@@ -34,14 +34,14 @@ struct result_container
     result_container(const unsigned res)
     : type(result_type::UNSIGNED)
     , data(static_cast<void*>(new unsigned(res)))
-    {}  
+    {}
 
     operator std::string()
     {
         assert(type == result_type::STRING);
         return *static_cast<std::string*>(data);
     }
-     
+
     operator std::string() const
     {
         assert(type == result_type::STRING);
@@ -53,7 +53,7 @@ struct result_container
         assert(type == result_type::UNSIGNED);
         return *static_cast<unsigned*>(data);
     }
- 
+
     operator unsigned() const
     {
         assert(type == result_type::UNSIGNED);

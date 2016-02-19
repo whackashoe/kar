@@ -36,7 +36,7 @@ struct ordered_bounded_queue
                         break;
                     }
                 }
-                
+
                 if(data.size() > size) {
                     data.pop_back();
                 }

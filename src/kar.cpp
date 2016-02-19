@@ -73,25 +73,7 @@ bool verbose { false };
 std::size_t port          { 4334 };
 std::string host          { "0.0.0.0" };
 std::size_t thread_amount { 8 };
-std::string password      { ([](std::size_t length) {
-    static const std::string alphanums =
-        "0123456789"
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-
-    static std::mt19937 rg{std::random_device{}()};
-    static std::uniform_int_distribution<> pick(0, alphanums.size() - 1);
-
-    std::string s;
-
-    s.reserve(length);
-
-    while(length--) {
-        s += alphanums[pick(rg)];
-    }
-
-    return s;
-})(32) };
+std::string password      { "secretpass" };
 
 
 
@@ -170,7 +152,8 @@ void display_usage()
         << "-h            : show this help" << std::endl
         << "-v            : show version" << std::endl
         << "-V            : set verbose" << std::endl
-        << "-d            : run as daemon" << std::endl;
+        << "-d            : run as daemon" << std::endl
+        << "-c FILE       : load config from file" << std::endl;
 }
 
 void display_version()
@@ -292,14 +275,6 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
             }
         }
 
-		int cl;
-		server::request::headers_container_type const &hs = req.headers;
-		for(server::request::headers_container_type::const_iterator it = hs.begin(); it!=hs.end(); ++it) {
-			if(boost::to_lower_copy(it->name)=="content-length") {
-				cl = boost::lexical_cast<int>(it->value);
-				break;
-			}
-		}
 
         if(verbose) {
             boost::lock_guard<boost::mutex> lock(mtx);
@@ -312,6 +287,15 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
         if(req.method == "GET") {
             handle_get_request();
         } else if(req.method == "POST") {
+            std::size_t cl { 0 };
+            server::request::headers_container_type const &hs = req.headers;
+            for(server::request::headers_container_type::const_iterator it = hs.begin(); it!=hs.end(); ++it) {
+                if(boost::to_lower_copy(it->name)=="content-length") {
+                    cl = boost::lexical_cast<int>(it->value);
+                    break;
+                }
+            }
+
     		read_body_chunk(cl);
         } else if(req.method == "DELETE") {
             handle_delete_request();
@@ -446,7 +430,7 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
         const result_container maxc { num_check(s_maxc) }; if(maxc.get_type() != result_type::UNSIGNED) { err("notnum_maxc"); return; }
 
         database & db = databases[get_db_name_from_path()];
-        
+
         json jres;
         jres["status"] = json::object();
         jres["status"]["success"] = true;
@@ -496,13 +480,13 @@ struct async_handler
     }
 };
 
-void load_config(const std::string & src)
+bool load_config(const std::string & src)
 {
     std::cout << "loading config from: " << src << std::endl;
     std::ifstream t(src);
     if(! t.is_open()) {
         std::cerr << "config file could not be opened" << std::endl;
-        exit(EXIT_FAILURE);
+        return false;
     }
 
     std::string str;
@@ -534,24 +518,52 @@ void load_config(const std::string & src)
         read_string_from_config("host", host);
         read_sizet_from_config("port", port);
         read_sizet_from_config("threads", thread_amount);
+        if(thread_amount == 0) {
+            thread_amount = boost::thread::hardware_concurrency();
+            std::cout << "found " << thread_amount << " cores" << std::endl;
+
+            if(thread_amount == 0) {
+                std::cerr << "grabbing core count failed, defaulting thread_amount to 4" << std::endl;
+                thread_amount = 4;
+            }
+        }
+
         read_string_from_config("password", password);
+        if(c.find("password") == c.end()) {
+            std::cerr << "password must be set" << std::endl;
+            return false;
+        }
 
         json db_names = c["databases"];
-        for(std::string name : db_names) {
+        for(const std::string & name : db_names) {
             databases[name] = database();
             std::cout << "database \"" << name << "\" created" << std::endl;
         }
     } catch(...) {
         std::cerr << "error reading from config" << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+std::unique_ptr<server> instance;
+std::vector<boost::thread> threads;
+
+void join_server_threads()
+{
+    for(auto & i : threads) {
+        i.join();
     }
 }
 
 void sig_handler(const int s)
 {
     std::cout << "caught signal " << s << std::endl;
+    instance->stop();
+    join_server_threads();
     exit(1);
 }
-
 
 int main(int argc, char ** argv)
 {
@@ -598,7 +610,9 @@ int main(int argc, char ** argv)
     }
 
     if(! config_src.empty()) {
-        load_config(config_src);
+        if(! load_config(config_src)) {
+            return EXIT_FAILURE;
+        }
     } else {
         std::cerr << "no config file given" << std::endl;
         return EXIT_FAILURE;
@@ -611,8 +625,6 @@ int main(int argc, char ** argv)
         }
     }
 
-    std::cout << "kar started" << std::endl;
-    std::cout << thread_amount << " threads listening on " << host << ":" << port << std::endl;
 
     async_handler handler;
     server::options options(handler);
@@ -620,18 +632,17 @@ int main(int argc, char ** argv)
     options.address(host).port(std::to_string(port))
         .thread_pool(boost::make_shared<boost::network::utils::thread_pool>(thread_amount));
 
-    server instance(options);
-    std::vector<boost::thread> threads;
+    instance = std::unique_ptr<server>(new server(options));
     for(std::size_t i=0; i<thread_amount; ++i) {
-        threads.push_back(boost::thread(boost::bind(&server::run, &instance)));
+        threads.push_back(boost::thread(boost::bind(&server::run, instance.get())));
     }
 
-    instance.run();
+    std::cout << "kar started" << std::endl;
+    std::cout << thread_amount << " threads listening on " << host << ":" << port << std::endl;
 
-    for(auto & i : threads) {
-        i.join();
-    }
-    
+    instance->run();
+    join_server_threads();
+
     return EXIT_SUCCESS;
 }
 
