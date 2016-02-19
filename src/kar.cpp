@@ -169,16 +169,16 @@ typedef boost::network::http::async_server<async_handler> server;
 struct connection_handler : boost::enable_shared_from_this<connection_handler>
 {
     server::connection_ptr conn;
-	server::request const &req;
+    server::request const &req;
     std::map<std::string, std::string> qparams;
     std::string protocol, host, path, query;
-	std::string body;
+    std::string body;
     std::vector<server::response_header> headers;
     bool password_authorized;
 
-	connection_handler(server::connection_ptr conn, server::request const &request)
+    connection_handler(server::connection_ptr conn, server::request const &request)
     : conn(conn)
-	, req(request)
+    , req(request)
     , body("")
     , headers({
         server::response_header{"Connection",   "close"},
@@ -265,7 +265,7 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
         return path.substr(1, path.length());
     }
 
-	void accept()
+    void accept()
     {
         {
             const std::string db_name = get_db_name_from_path();
@@ -296,48 +296,48 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
                 }
             }
 
-    		read_body_chunk(cl);
+            read_body_chunk(cl);
         } else if(req.method == "DELETE") {
             handle_delete_request();
         } else {
             err("method_not_supported");
         }
-	}
+    }
 
-	void read_body_chunk(std::size_t left2read)
+    void read_body_chunk(std::size_t left2read)
     {
-		conn->read(
-			boost::bind(
-				&connection_handler::handle_post_read,
-				connection_handler::shared_from_this(),
-				_1, _2, _3, left2read
-				)
-			);
-	}
+        conn->read(
+            boost::bind(
+                &connection_handler::handle_post_read,
+                connection_handler::shared_from_this(),
+                _1, _2, _3, left2read
+                )
+            );
+    }
 
-	void handle_post_read(
+    void handle_post_read(
         server::connection::input_range range,
         boost::system::error_code error,
         std::size_t size,
         std::size_t left2read
     ) {
-		if(! error) {
-			body.append(boost::begin(range), size);
-			const std::size_t left { left2read - size };
+        if(! error) {
+            body.append(boost::begin(range), size);
+            const std::size_t left { left2read - size };
 
-			if(left > 0) {
-				read_body_chunk(left);
-			} else {
+            if(left > 0) {
+                read_body_chunk(left);
+            } else {
                 handle_post_request();
-			}
-		} else {
+            }
+        } else {
             boost::lock_guard<boost::mutex> lock(mtx);
-    		std::cout << "error: " << error.message() << std::endl;
+            std::cout << "error: " << error.message() << std::endl;
         }
-	}
+    }
 
-	void handle_post_request()
-	{
+    void handle_post_request()
+    {
         if(! password_authorized) {
             err("password_auth");
             return;
@@ -386,8 +386,8 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
         conn->write(jres.dump());
     }
 
-	void handle_get_request()
-	{
+    void handle_get_request()
+    {
         if(qparams.find("q") == qparams.end()) {
             err("q_not_supplied");
             return;
@@ -439,7 +439,7 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
         conn->set_status(server::connection::ok);
         conn->set_headers(boost::make_iterator_range(headers.begin(), headers.end()));
         conn->write(jres.dump());
-	}
+    }
 
     void handle_delete_request()
     {
