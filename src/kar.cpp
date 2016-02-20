@@ -9,6 +9,7 @@
 #include <utility>
 #include <chrono>
 #include <cstdlib>
+#include <cstdint>
 #include <sstream>
 #include <memory>
 #include <fstream>
@@ -56,7 +57,7 @@ boost::mutex mtx;
 struct database
 {
     trie tree;
-    std::unordered_map<std::string, std::size_t> ids;
+    std::unordered_map<std::string, std::uint64_t> ids;
 
 
     database()
@@ -70,7 +71,7 @@ std::unordered_map<std::string, database> databases;
 
 // settings
 bool verbose { false };
-std::size_t port          { 4334 };
+std::uint16_t port        { 4334 };
 std::string host          { "0.0.0.0" };
 std::size_t thread_amount { 8 };
 std::string password      { "secretpass" };
@@ -114,13 +115,13 @@ std::string trim(const std::string & s)
 json exec_query(
     database & db,
     const std::string & search_term,
-    const std::size_t   amount,
-    const unsigned      insert_cost,
-    const unsigned      delete_cost,
-    const unsigned      replace_cost,
-    const unsigned      max_cost
+    const std::uint64_t amount,
+    const std::int32_t  insert_cost,
+    const std::int32_t  delete_cost,
+    const std::int32_t  replace_cost,
+    const std::int32_t  max_cost
 ) {
-    const std::vector<std::pair<unsigned, std::string>> results { db.tree.search(
+    const std::vector<std::pair<std::uint32_t, std::string>> results { db.tree.search(
         search_term,
         amount,
         insert_cost,
@@ -130,9 +131,9 @@ json exec_query(
     ) };
 
     json jres = json::array();
-    for(const std::pair<std::size_t, std::string> & i : results) {
-        const std::size_t id       { db.ids[i.second] };
-        const std::size_t distance { i.first };
+    for(const std::pair<std::uint64_t, std::string> & i : results) {
+        const std::uint64_t id       { db.ids[i.second] };
+        const std::uint64_t distance { i.first };
 
         // we skip the default id (special word)
         if(id == 0) {
@@ -284,19 +285,19 @@ struct connection_handler : boost::enable_shared_from_this<connection_handler>
                       << std::endl;
         }
 
+        std::size_t content_length { 0 };
+        server::request::headers_container_type const &hs = req.headers;
+        for(server::request::headers_container_type::const_iterator it = hs.begin(); it!=hs.end(); ++it) {
+            if(boost::to_lower_copy(it->name)=="content-length") {
+                content_length = boost::lexical_cast<int>(it->value);
+                break;
+            }
+        }
+
         if(req.method == "GET") {
             handle_get_request();
         } else if(req.method == "POST") {
-            std::size_t cl { 0 };
-            server::request::headers_container_type const &hs = req.headers;
-            for(server::request::headers_container_type::const_iterator it = hs.begin(); it!=hs.end(); ++it) {
-                if(boost::to_lower_copy(it->name)=="content-length") {
-                    cl = boost::lexical_cast<int>(it->value);
-                    break;
-                }
-            }
-
-            read_body_chunk(cl);
+            read_body_chunk(content_length);
         } else if(req.method == "DELETE") {
             handle_delete_request();
         } else {
@@ -501,23 +502,24 @@ bool load_config(const std::string & src)
     try {
         json c = json::parse(str);
 
-        auto read_string_from_config = [&](const std::string & key, std::string & v)
-        {
-            if(c.find(key) != c.end()) {
-                v = c[key];
-            }
-        };
+        if(c.find("host") != c.end()) {
+            host = c["host"];
+        } else {
+            std::cerr << "host must be set" << std::endl;
+            return false;
+        }
 
-        auto read_sizet_from_config = [&](const std::string & key, std::size_t & v)
-        {
-            if(c.find(key) != c.end()) {
-                v = c[key];
-            }
-        };
+        if(c.find("port") != c.end()) {
+            port = c["port"];
+        } else {
+            std::cerr << "port must be set" << std::endl;
+            return false;
+        }
 
-        read_string_from_config("host", host);
-        read_sizet_from_config("port", port);
-        read_sizet_from_config("threads", thread_amount);
+        if(c.find("threads") != c.end()) {
+            thread_amount = c["threads"];
+        }
+
         if(thread_amount == 0) {
             thread_amount = boost::thread::hardware_concurrency();
             std::cout << "found " << thread_amount << " cores" << std::endl;
@@ -528,8 +530,9 @@ bool load_config(const std::string & src)
             }
         }
 
-        read_string_from_config("password", password);
-        if(c.find("password") == c.end()) {
+        if(c.find("password") != c.end()) {
+            password = c["password"];
+        } else {
             std::cerr << "password must be set" << std::endl;
             return false;
         }
